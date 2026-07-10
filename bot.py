@@ -998,7 +998,7 @@ async def todayexcel(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "第一班迟到","第二班迟到","休息次数","总休息分钟",
             "工作原因休息次数","工作原因总休息分钟","状态"]
     df = pd.DataFrame(rows, columns=cols) if rows else pd.DataFrame(columns=cols)
-    df.to_excel(filepath, index=False)
+    df.to_excel(filepath, index=False, engine='xlsxwriter')
 
     with open(filepath, 'rb') as f:
         await update.message.reply_document(f, filename=filename, caption=f"✅ {today} 全群打卡报表")
@@ -1020,7 +1020,7 @@ async def monthexcel(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "第一班迟到","第二班迟到","休息次数","总休息分钟",
             "工作原因休息次数","工作原因总休息分钟","状态"]
     df = pd.DataFrame(rows, columns=cols) if rows else pd.DataFrame(columns=cols)
-    df.to_excel(filepath, index=False)
+    df.to_excel(filepath, index=False, engine='xlsxwriter')
 
     with open(filepath, 'rb') as f:
         await update.message.reply_document(f, filename=filename, caption=f"✅ {month} 月报表")
@@ -1096,7 +1096,7 @@ async def send_daily_report(context: ContextTypes.DEFAULT_TYPE):
                     "工作原因休息次数","工作原因总休息分钟","状态"]
             
             df = pd.DataFrame(rows, columns=cols) if rows else pd.DataFrame(columns=cols)
-            df.to_excel(filepath, index=False)
+            df.to_excel(filepath, index=False, engine='xlsxwriter')
 
             caption = f"📊 **{report_date} 全群日报**（02:00~次日02:00）"
 
