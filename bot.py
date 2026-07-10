@@ -8,6 +8,8 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 from zoneinfo import ZoneInfo
 import time as time_module
 import shutil
+import signal
+import telegram
 
 # ================== 配置区 ==================
 TOKEN = os.getenv("BOT_TOKEN")
@@ -280,7 +282,9 @@ class DataManager:
         return self._data
 
     async def aload(self, force: bool = False) -> dict:
-        return await asyncio.to_thread(self.load, force)
+        async with self._global_lock:
+            # 在锁内执行同步 load 逻辑，确保加载过程不被重叠
+            return await asyncio.to_thread(self.load, force)
 
     async def save(self, immediate: bool = False):
         async with self._global_lock:
@@ -1051,36 +1055,18 @@ async def send_daily_report(context: ContextTypes.DEFAULT_TYPE):
     now = beijing_now()
     report_date = get_report_date_for_daily()
     
-    # ================== 强力调试日志 ==================
     print("=" * 80)
     print(f"🕒 自动日报任务触发 | 北京时间: {now.strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"📊 要生成的报表日期: {report_date}")
     print("=" * 80)
 
-    # 调试：查看数据中实际存在的日期（帮助排查问题）
-    all_data = await data_manager.aload(force=True)
-    debug_shown = False
-    for chat_id_str, chat_data in list(all_data.items()):
-        if not chat_id_str.startswith('-'):
-            continue
-        print(f"群 {chat_id_str} 存在的日期记录：")
-        for user_id, user_info in list(chat_data.get("users", {}).items())[:3]:  # 只看前3个用户
-            dates = sorted(user_info.get("records", {}).keys(), reverse=True)
-            print(f"  - 用户 {user_id} 最近5个日期: {dates[:5] if dates else '无记录'}")
-            debug_shown = True
-            break
-        if debug_shown:
-            break
-    if not debug_shown:
-        print("⚠️ 未找到任何群组数据或记录")
-    print("=" * 80)
-    # ================== 调试结束 ==================
-
     cleanup_old_excels()
 
+    # 1. 统一加载最新数据快照
     all_data = await data_manager.aload(force=True)
     sent_count = 0
     
+    # 2. 遍历快照中的群组
     for chat_id_str, chat_data in list(all_data.items()):
         if not chat_id_str.startswith('-'):   
             continue
@@ -1098,8 +1084,9 @@ async def send_daily_report(context: ContextTypes.DEFAULT_TYPE):
             continue
 
         try:
-            fresh_chat_data = await data_manager.get_chat_data(chat_id_str)
-            rows = build_daily_report_rows(fresh_chat_data, report_date)
+            # 修复点：直接使用循环中的 chat_data，它已经是 all_data 快照的一部分
+            # 避免再次调用 get_chat_data 导致潜在的锁竞争或数据不一致
+            rows = build_daily_report_rows(chat_data, report_date)
             
             filename = f"全群打卡日报_{report_date}.xlsx"
             filepath = os.path.join(EXCEL_FOLDER, filename)
@@ -1136,6 +1123,16 @@ async def send_daily_report(context: ContextTypes.DEFAULT_TYPE):
     
     print(f"🎉 自动日报任务全部完成，共处理 {sent_count} 个群组")
 
+# ================== 新增：连接检查函数 ==================
+async def check_connection(context: ContextTypes.DEFAULT_TYPE):
+    """每天固定时间检查机器人连接状态"""
+    try:
+        print(f"🔍 {beijing_now().strftime('%H:%M:%S')} 执行连接检查...")
+        me = await context.bot.get_me()
+        print(f"✅ 连接正常 | Bot: @{me.username} | {beijing_now()}")
+    except Exception as e:
+        print(f"❌ 连接检查失败: {e}")
+        os.kill(os.getpid(), signal.SIGTERM)
 
 # ================== 其他命令 ==================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1229,53 +1226,80 @@ async def today_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     global data_manager
     data_manager = DataManager()
-    
     print("📦 DataManager 初始化完成")
     data_manager.load(force=True)
-    
-    app = Application.builder() \
-        .token(TOKEN) \
-        .defaults(None) \
-        .build()
-    
-    jq: JobQueue = app.job_queue
-    
-    beijing_tz = ZoneInfo("Asia/Shanghai")
-    
-    daily_time = datetime_time(1, 30, 0, tzinfo=beijing_tz)
-    cleanup_time = datetime_time(1, 40, 0, tzinfo=beijing_tz)
-    
-    jq.run_daily(send_daily_report, daily_time)
-    jq.run_daily(data_manager.cleanup_old_data, cleanup_time)
 
-    print(f"⏰ 已设置自动任务：")
-    print(f"   • 数据清理 → 北京时间 {cleanup_time}")
-    print(f"   • 自动日报 → 北京时间 {daily_time}")
+    print("🚀 打卡机器人启动中...（已加入 Bad Gateway 自动重启机制）")
 
-    handlers = [
-        CommandHandler("start", start),
-        CommandHandler("jihuo", activate_group),      # 新增激活指令
-        CommandHandler("register", auto_register),
-        CommandHandler("registered", registered_list),
-        CommandHandler("myrecord", myrecord),
-        CommandHandler("addadmin", add_admin),
-        CommandHandler("deladmin", del_admin),
-        CommandHandler("adminlist", adminlist),
-        CommandHandler("deluser", deluser),
-        CommandHandler("del", delete_record),
-        CommandHandler("todayexcel", todayexcel),
-        CommandHandler("monthexcel", monthexcel),
-        CommandHandler("absent", absent),
-        CommandHandler("today", today_cmd),
-    ]
+    while True:   # 核心：自动重启循环
+        app = None
+        try:
+            app = Application.builder().token(TOKEN).build()
+            jq: JobQueue = app.job_queue
 
-    for h in handlers:
-        app.add_handler(h)
+            beijing_tz = ZoneInfo("Asia/Shanghai")
 
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_daka))
+            # 原有定时任务
+            jq.run_daily(send_daily_report, datetime_time(1, 30, 0, tzinfo=beijing_tz))
+            jq.run_daily(data_manager.cleanup_old_data, datetime_time(1, 40, 0, tzinfo=beijing_tz))
 
-    print("🚀 打卡机器人已完全启动（啊财的机器人  7.07 ）")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+            # 新增：每天早上9.30点检查连接
+            jq.run_daily(check_connection, datetime_time(9, 30, 0, tzinfo=beijing_tz))
+
+            # ================== 注册所有命令 ==================
+            handlers = [
+                CommandHandler("start", start),
+                CommandHandler("jihuo", activate_group),
+                CommandHandler("register", auto_register),
+                CommandHandler("registered", registered_list),
+                CommandHandler("myrecord", myrecord),
+                CommandHandler("addadmin", add_admin),
+                CommandHandler("deladmin", del_admin),
+                CommandHandler("adminlist", adminlist),
+                CommandHandler("deluser", deluser),
+                CommandHandler("del", delete_record),
+                CommandHandler("todayexcel", todayexcel),
+                CommandHandler("monthexcel", monthexcel),
+                CommandHandler("absent", absent),
+                CommandHandler("today", today_cmd),
+            ]
+
+            for h in handlers:
+                app.add_handler(h)
+
+            app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_daka))
+
+            print(f"✅ Polling 已启动 | 北京时间: {beijing_now()}")
+            
+            app.run_polling(
+                allowed_updates=Update.ALL_TYPES,
+                drop_pending_updates=True,
+                timeout=30,
+                read_timeout=30,
+                write_timeout=30,
+                connect_timeout=30
+            )
+
+        except (telegram.error.NetworkError, telegram.error.TimeoutError, telegram.error.RetryAfter) as e:
+            if "Bad Gateway" in str(e) or "Connection" in str(e) or "Timeout" in str(e):
+                print(f"⚠️ Telegram 网络问题: {e}")
+                print("🔄 30秒后自动重启机器人...")
+            else:
+                print(f"❌ 其他网络错误: {e}")
+                print("🔄 60秒后自动重启...")
+            time_module.sleep(30)
+            
+        except Exception as e:
+            print(f"❌ 其他异常: {e}")
+            time_module.sleep(10)
+        
+        finally:
+            if app:
+                try:
+                    app.stop()
+                except:
+                    pass
+            time_module.sleep(5)
 
 
 if __name__ == "__main__":
