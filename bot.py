@@ -1223,27 +1223,34 @@ async def today_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ================== 主程序 ==================
-# ================== 主程序 ==================
 def main():
     global data_manager
     data_manager = DataManager()
     print("📦 DataManager 初始化完成")
     data_manager.load(force=True)
 
-    print("🚀 打卡机器人启动中...（已加入 Bad Gateway 自动重启机制）")
+    print("🚀 打卡机器人启动中...")
 
-    while True:   # 核心：自动重启循环
+    while True:
         app = None
         try:
-            app = Application.builder().token(TOKEN).build()
-            jq: JobQueue = app.job_queue
-
-            beijing_tz = ZoneInfo("Asia/Shanghai")
-
-            # 定时任务
-            jq.run_daily(send_daily_report, datetime_time(1, 30, 0, tzinfo=beijing_tz))
-            jq.run_daily(data_manager.cleanup_old_data, datetime_time(1, 40, 0, tzinfo=beijing_tz))
-            jq.run_daily(check_connection, datetime_time(9, 30, 0, tzinfo=beijing_tz))
+            builder = Application.builder().token(TOKEN)
+            app = builder.build()
+            
+            # ================== JobQueue 安全检查 ==================
+            if not hasattr(app, 'job_queue') or app.job_queue is None:
+                print("⚠️ JobQueue 未启用！请确保安装了 python-telegram-bot[job-queue]")
+                print("🔄 尝试继续运行（无定时任务）...")
+                jq = None
+            else:
+                jq: JobQueue = app.job_queue
+                print("✅ JobQueue 初始化成功")
+                
+                beijing_tz = ZoneInfo("Asia/Shanghai")
+                
+                jq.run_daily(send_daily_report, datetime_time(1, 30, 0, tzinfo=beijing_tz))
+                jq.run_daily(data_manager.cleanup_old_data, datetime_time(1, 40, 0, tzinfo=beijing_tz))
+                jq.run_daily(check_connection, datetime_time(9, 30, 0, tzinfo=beijing_tz))
 
             # ================== 注册所有命令 ==================
             handlers = [
@@ -1267,7 +1274,7 @@ def main():
 
             app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_daka))
 
-            print(f"✅ Polling 已启动 | 北京时间: {beijing_now()}")
+            print(f"✅ Bot Polling 已启动 | 北京时间: {beijing_now()}")
             
             app.run_polling(
                 allowed_updates=Update.ALL_TYPES,
@@ -1278,44 +1285,19 @@ def main():
                 connect_timeout=30
             )
 
-        # ================== 修复后的异常捕获 ==================
-        except (telegram.error.NetworkError, 
-                telegram.error.RetryAfter, 
-                telegram.error.TelegramError) as e:
-            
-            error_str = str(e).lower()
-            if any(keyword in error_str for keyword in ["bad gateway", "connection", "timeout", "network", "retry"]):
-                print(f"⚠️ Telegram 网络问题: {e}")
-                print("🔄 30秒后自动重启机器人...")
-                time_module.sleep(30)
-            else:
-                print(f"❌ Telegram 其他错误: {e}")
-                time_module.sleep(15)
-                
-        except SyntaxError as e:   # 防止你再次改错语法
-            print(f"❌ 代码语法错误: {e}")
-            print("请检查代码缩进！")
-            time_module.sleep(10)
-            break  # 语法错误直接退出循环，避免无限重启
-            
         except Exception as e:
-            print(f"❌ 未预料异常: {e}")
+            print(f"❌ 启动异常: {e}")
             import traceback
             traceback.print_exc()
-            time_module.sleep(10)
+            time_module.sleep(15)
         
-        # ================== 清理 ==================
         finally:
-            if app is not None:
+            if app:
                 try:
-                    # 安全停止
-                    if hasattr(app, "stop") and asyncio.iscoroutinefunction(app.stop):
-                        asyncio.run(app.stop())
-                    else:
-                        app.stop()
+                    app.stop()
                 except:
                     pass
-            time_module.sleep(5)
+            time_module.sleep(8)
 
 
 if __name__ == "__main__":
