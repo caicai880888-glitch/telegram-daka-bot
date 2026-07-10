@@ -1229,9 +1229,15 @@ def main():
     print("📦 DataManager 初始化完成")
     data_manager.load(force=True)
 
-    print("🚀 打卡机器人启动中...（已加入 Bad Gateway 自动重启机制）")
+    print("🚀 打卡机器人启动中...")
 
-    while True:   # 核心：自动重启循环
+    # === 新增：确保 JobQueue 可用 ===
+    try:
+        import pytz  # 如果需要
+    except:
+        pass
+
+    while True:
         app = None
         try:
             app = Application.builder().token(TOKEN).build()
@@ -1280,26 +1286,25 @@ def main():
                 connect_timeout=30
             )
 
-        except (telegram.error.NetworkError, telegram.error.TimeoutError, telegram.error.RetryAfter) as e:
-            if "Bad Gateway" in str(e) or "Connection" in str(e) or "Timeout" in str(e):
-                print(f"⚠️ Telegram 网络问题: {e}")
-                print("🔄 30秒后自动重启机器人...")
-            else:
-                print(f"❌ 其他网络错误: {e}")
-                print("🔄 60秒后自动重启...")
-            time_module.sleep(30)
-            
-        except Exception as e:
-            print(f"❌ 其他异常: {e}")
-            time_module.sleep(10)
+except (telegram.error.NetworkError, 
+        telegram.error.RetryAfter, 
+        telegram.error.TelegramError) as e:   # TimeoutError 已移除
+    error_str = str(e).lower()
+    if any(x in error_str for x in ["bad gateway", "connection", "timeout", "network"]):
+        print(f"⚠️ Telegram 网络问题: {e}")
+        print("🔄 30秒后自动重启机器人...")
+        time_module.sleep(30)
+    else:
+        print(f"❌ 其他 Telegram 错误: {e}")
+        time_module.sleep(10)
         
-        finally:
-            if app:
-                try:
-                    app.stop()
-                except:
-                    pass
-            time_module.sleep(5)
+finally:
+    if app:
+        try:
+            await app.stop() if asyncio.iscoroutinefunction(app.stop) else app.stop()
+        except:
+            pass
+    time_module.sleep(5)
 
 
 if __name__ == "__main__":
