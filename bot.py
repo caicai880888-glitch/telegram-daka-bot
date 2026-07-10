@@ -1276,13 +1276,16 @@ def main():
 
             print(f"✅ Bot Polling 已启动 | 北京时间: {beijing_now()}")
             
+            # 修复弃用警告的写法
             app.run_polling(
                 allowed_updates=Update.ALL_TYPES,
                 drop_pending_updates=True,
-                timeout=30,
-                read_timeout=30,
-                write_timeout=30,
-                connect_timeout=30
+                # 新推荐写法：
+                get_updates_read_timeout=30,
+                get_updates_write_timeout=30,
+                get_updates_connect_timeout=30,
+                get_updates_pool_timeout=30,
+                timeout=30,                    # 保留以兼容
             )
 
         except Exception as e:
