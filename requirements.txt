@@ -1,4 +1,3 @@
 python-telegram-bot==20.9
 pandas
-openpyxl          # ← 加上这一行
-xlsxwriter        # 或者加上这个（推荐）
+xlsxwriter       
