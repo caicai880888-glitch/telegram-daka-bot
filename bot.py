@@ -1234,7 +1234,15 @@ def main():
     while True:
         app = None
         try:
-            app = Application.builder().token(TOKEN).build()
+            app = (
+                Application.builder()
+                .token(TOKEN)
+                .get_updates_read_timeout(30)
+                .get_updates_write_timeout(30)
+                .get_updates_connect_timeout(30)
+                .get_updates_pool_timeout(30)
+                .build()
+            )
             jq: JobQueue = app.job_queue
 
             beijing_tz = ZoneInfo("Asia/Shanghai")
@@ -1268,14 +1276,9 @@ def main():
 
             print(f"✅ Bot Polling 已启动 | 北京时间: {beijing_now()}")
             
-            # ================== 修复后的 Polling ==================
             app.run_polling(
                 allowed_updates=Update.ALL_TYPES,
                 drop_pending_updates=True,
-                timeout=30,
-                read_timeout=30,
-                write_timeout=30,
-                connect_timeout=30
             )
 
         except Exception as e:
