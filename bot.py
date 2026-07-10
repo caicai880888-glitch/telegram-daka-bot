@@ -1229,28 +1229,20 @@ def main():
     print("📦 DataManager 初始化完成")
     data_manager.load(force=True)
 
-    print("🚀 打卡机器人启动中...")
+    print("🚀 打卡机器人启动中...（已加入 Bad Gateway 自动重启机制）")
 
     while True:
         app = None
         try:
-            builder = Application.builder().token(TOKEN)
-            app = builder.build()
-            
-            # ================== JobQueue 安全检查 ==================
-            if not hasattr(app, 'job_queue') or app.job_queue is None:
-                print("⚠️ JobQueue 未启用！请确保安装了 python-telegram-bot[job-queue]")
-                print("🔄 尝试继续运行（无定时任务）...")
-                jq = None
-            else:
-                jq: JobQueue = app.job_queue
-                print("✅ JobQueue 初始化成功")
-                
-                beijing_tz = ZoneInfo("Asia/Shanghai")
-                
-                jq.run_daily(send_daily_report, datetime_time(1, 30, 0, tzinfo=beijing_tz))
-                jq.run_daily(data_manager.cleanup_old_data, datetime_time(1, 40, 0, tzinfo=beijing_tz))
-                jq.run_daily(check_connection, datetime_time(9, 30, 0, tzinfo=beijing_tz))
+            app = Application.builder().token(TOKEN).build()
+            jq: JobQueue = app.job_queue
+
+            beijing_tz = ZoneInfo("Asia/Shanghai")
+
+            # 定时任务
+            jq.run_daily(send_daily_report, datetime_time(1, 30, 0, tzinfo=beijing_tz))
+            jq.run_daily(data_manager.cleanup_old_data, datetime_time(1, 40, 0, tzinfo=beijing_tz))
+            jq.run_daily(check_connection, datetime_time(9, 30, 0, tzinfo=beijing_tz))
 
             # ================== 注册所有命令 ==================
             handlers = [
@@ -1276,23 +1268,26 @@ def main():
 
             print(f"✅ Bot Polling 已启动 | 北京时间: {beijing_now()}")
             
-            # 修复弃用警告的写法
+            # ================== 修复后的 Polling ==================
             app.run_polling(
                 allowed_updates=Update.ALL_TYPES,
                 drop_pending_updates=True,
-                # 新推荐写法：
-                get_updates_read_timeout=30,
-                get_updates_write_timeout=30,
-                get_updates_connect_timeout=30,
-                get_updates_pool_timeout=30,
-                timeout=30,                    # 保留以兼容
+                timeout=30,
+                read_timeout=30,
+                write_timeout=30,
+                connect_timeout=30
             )
 
         except Exception as e:
-            print(f"❌ 启动异常: {e}")
-            import traceback
-            traceback.print_exc()
-            time_module.sleep(15)
+            error_str = str(e).lower()
+            if "bad gateway" in error_str or "connection" in error_str or "timeout" in error_str or "network" in error_str:
+                print(f"⚠️ Telegram 网络问题: {e}")
+                time_module.sleep(30)
+            else:
+                print(f"❌ 启动异常: {e}")
+                import traceback
+                traceback.print_exc()
+                time_module.sleep(10)
         
         finally:
             if app:
@@ -1300,7 +1295,7 @@ def main():
                     app.stop()
                 except:
                     pass
-            time_module.sleep(8)
+            time_module.sleep(5)
 
 
 if __name__ == "__main__":
