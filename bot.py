@@ -1243,7 +1243,7 @@ def main():
                 .get_updates_pool_timeout(30)
                 .build()
             )
-            jq: JobQueue = app.job_queue
+                        jq = app.job_queue
 
             beijing_tz = ZoneInfo("Asia/Shanghai")
 
