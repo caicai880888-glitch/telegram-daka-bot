@@ -1224,6 +1224,33 @@ async def today_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
+# ================== 全局错误处理器 ==================
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    """捕获所有错误，防止 Bot 因为 Bad Gateway 等网络问题直接崩溃"""
+    error = context.error
+    
+    print(f"❌ 【全局错误】 {type(error).__name__}: {error}")
+    
+    # 网络相关错误（最常见的问题）
+    if isinstance(error, telegram.error.NetworkError):
+        print("🌐 检测到 Telegram 网络错误（Bad Gateway / Timeout），Bot 将自动继续运行...")
+        await asyncio.sleep(5)   # 短暂等待后继续
+        return
+        
+    if isinstance(error, telegram.error.TelegramError):
+        print("⚠️ Telegram API 错误，Bot 将继续运行...")
+        return
+    
+    # 其他未知严重错误，打印完整堆栈
+    import traceback
+    print("🔥 严重错误（非网络错误）:")
+    print(traceback.format_exc())
+    
+    # 可选：通知群主或管理员（把 YOUR_ADMIN_ID 改成你的ID）
+    # try:
+    #     await context.bot.send_message(YOUR_ADMIN_ID, f"🚨 机器人发生错误:\n{error}")
+    # except:
+    #     pass
 
 # ================== 主程序 ==================
 def main():
@@ -1237,7 +1264,11 @@ def main():
         .token(TOKEN) \
         .defaults(None) \
         .build()
-    
+
+    # ================== 【新增】注册全局错误处理器 ==================
+    app.add_error_handler(error_handler)
+    # ============================================================
+
     jq: JobQueue = app.job_queue
     
     beijing_tz = ZoneInfo("Asia/Shanghai")
