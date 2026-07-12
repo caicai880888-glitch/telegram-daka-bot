@@ -282,24 +282,32 @@ class DataManager:
     async def aload(self, force: bool = False) -> dict:
         return await asyncio.to_thread(self.load, force)
 
+    def _sync_save(self, data):
+        """同步保存的内部函数，供线程池调用"""
+        try:
+            temp_file = DATA_FILE + ".tmp"
+            backup_file = DATA_FILE + ".bak"
+            with open(temp_file, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            if os.path.exists(DATA_FILE):
+                shutil.copy2(DATA_FILE, backup_file)
+            os.replace(temp_file, DATA_FILE)
+            return True
+        except Exception as e:
+            print(f"❌ 物理磁盘写入失败: {e}")
+            return False
+
     async def save(self, immediate: bool = False):
         async with self._global_lock:
             if not self._dirty and not immediate:
                 return
-            try:
-                temp_file = DATA_FILE + ".tmp"
-                backup_file = DATA_FILE + ".bak"
-                with open(temp_file, "w", encoding="utf-8") as f:
-                    json.dump(self._data, f, ensure_ascii=False, indent=2)
-                if os.path.exists(DATA_FILE):
-                    shutil.copy2(DATA_FILE, backup_file)
-                os.replace(temp_file, DATA_FILE)
+            # --- 关键修改：使用 to_thread 异步执行 ---
+            success = await asyncio.to_thread(self._sync_save, self._data.copy())
+            if success:
                 self._last_mtime = self._file_mtime()
                 self._last_save = time_module.time()
                 self._dirty = False
                 print(f"💾 数据已安全保存 | 群组: {len(self._data)}")
-            except Exception as e:
-                print(f"❌ 保存失败: {e}")
 
     async def _delayed_save(self):
         await asyncio.sleep(3)
@@ -698,7 +706,6 @@ async def daka(update: Update, context: ContextTypes.DEFAULT_TYPE, shift: str):
             }, name=job_name)
 
     await data_manager.update_chat_data(chat_id_str, chat_data)
-    await data_manager.force_save() # 立即保存数据，防止重启丢失
 
     emoji = "⚠️" if late_seconds > 0 else "✅"
     await update.message.reply_text(
@@ -1305,7 +1312,7 @@ def main():
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_daka))
 
-    print("🚀 打卡机器人已完全启动（啊财的机器人  7.07 ）")
+    print("🚀 打卡机器人已完全启动（啊财的机器人  7.10 ）")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
