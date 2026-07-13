@@ -3,6 +3,7 @@ import os
 import asyncio
 from datetime import datetime, timedelta, time as datetime_time
 import pandas as pd
+import telegram 
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, JobQueue
 from zoneinfo import ZoneInfo
@@ -237,7 +238,6 @@ class DataManager:
     def __init__(self):
         self._data: dict = {}
         self._last_mtime = 0
-        self._last_save = 0
         self._dirty = False
         self._global_lock = asyncio.Lock()
         self._chat_locks: dict[str, asyncio.Lock] = {}
@@ -261,29 +261,20 @@ class DataManager:
                 try:
                     with open(DATA_FILE, "r", encoding="utf-8") as f:
                         self._data = json.load(f)
-                    print(f"📥 数据已从磁盘加载 | 群组: {len(self._data)}")
+                    print(f"📥 数据加载完成 | 群组数: {len(self._data)}")
                 except Exception as e:
-                    print(f"❌ 加载数据失败: {e}")
+                    print(f"❌ 加载失败: {e}")
                     self._data = {}
-            # 如果文件不存在，_data 保持为空字典，或者根据需要初始化默认结构
-            # 确保在加载失败时 _data 仍然是一个有效的字典结构
-            if not os.path.exists(DATA_FILE):
+            else:
                 self._data = {}
-            # 如果加载失败，_data 已经被设置为 {}，这里不需要额外处理
-            # 确保在加载失败时，_data 仍然是一个有效的字典结构，避免后续操作出错
-            
             self._last_mtime = current_mtime
             self._dirty = False
-            
-            # 移除了容易导致数据丢失的自动迁移逻辑
-            
         return self._data
 
-    async def aload(self, force: bool = False) -> dict:
+    async def aload(self, force: bool = False):
         return await asyncio.to_thread(self.load, force)
 
     def _sync_save(self, data):
-        """同步保存的内部函数，供线程池调用"""
         try:
             temp_file = DATA_FILE + ".tmp"
             backup_file = DATA_FILE + ".bak"
@@ -294,20 +285,18 @@ class DataManager:
             os.replace(temp_file, DATA_FILE)
             return True
         except Exception as e:
-            print(f"❌ 物理磁盘写入失败: {e}")
+            print(f"❌ 保存失败: {e}")
             return False
 
     async def save(self, immediate: bool = False):
         async with self._global_lock:
             if not self._dirty and not immediate:
                 return
-            # --- 关键修改：使用 to_thread 异步执行 ---
             success = await asyncio.to_thread(self._sync_save, self._data.copy())
             if success:
                 self._last_mtime = self._file_mtime()
-                self._last_save = time_module.time()
                 self._dirty = False
-                print(f"💾 数据已安全保存 | 群组: {len(self._data)}")
+                print(f"💾 数据已保存 | 群组: {len(self._data)}")
 
     async def _delayed_save(self):
         await asyncio.sleep(3)
@@ -319,11 +308,9 @@ class DataManager:
             return {"registered": {}, "users": {}, "admins": [], "activated": False}
         
         async with self._get_chat_lock(chat_id_str):
+            await self.aload()  # 轻量读取
             return self._data.setdefault(chat_id_str, {
-                "registered": {},
-                "users": {},
-                "admins": [],
-                "activated": False
+                "registered": {}, "users": {}, "admins": [], "activated": False
             })
 
     async def update_chat_data(self, chat_id: str, chat_data: dict):
@@ -341,38 +328,23 @@ class DataManager:
 
     async def cleanup_old_data(self, context: ContextTypes.DEFAULT_TYPE = None):
         async with self._global_lock:
-            # 在清理前，确保内存中的数据是最新的，并已保存到磁盘
-            await self.force_save() # 确保所有内存中的修改都已写入磁盘
-            await self.aload(force=True) # 重新加载以确保操作的是磁盘上的最新数据
-            # 确保清理时不会删除当天的数据
-            # 获取当前考勤日期，确保不会删除当天的记录
-            today_attendance_date = get_attendance_date(beijing_now())
-            # 清理截止日期：早于35天前的考勤日期
-            cutoff_attendance_date = get_attendance_date(beijing_now() - timedelta(days=35))
+            await self.aload(force=True)
+            today = get_attendance_date(beijing_now())
+            cutoff = get_attendance_date(beijing_now() - timedelta(days=35))
             cleaned = 0
-            private_cleaned = 0
-            
             for chat_id_str in list(self._data.keys()):
                 if not chat_id_str.startswith('-'):
-                    del self._data[chat_id_str]
-                    private_cleaned += 1
-            
-            for chat_id in list(self._data.keys()):
-                if not chat_id.startswith('-'):
                     continue
-                for user_id in list(self._data[chat_id].get("users", {}).keys()):
-                    records = self._data[chat_id]["users"][user_id].get("records", {})
+                for user_id in list(self._data[chat_id_str].get("users", {}).keys()):
+                    records = self._data[chat_id_str]["users"][user_id].get("records", {})
                     for d in list(records.keys()):
-                        # 确保不删除当天考勤日期的数据，并且只删除早于截止日期的数据
-                        if d < cutoff_attendance_date and d != today_attendance_date:
+                        if d < cutoff and d != today:
                             del records[d]
                             cleaned += 1
-            
-            if private_cleaned > 0 or cleaned > 0:
+            if cleaned > 0:
                 self._dirty = True
                 await self.force_save()
-                print(f"🧹 已清理 {private_cleaned} 个私聊记录和 {cleaned} 条旧记录")
-
+                print(f"🧹 清理了 {cleaned} 条旧记录")
 
 # ================== ACTIONS ==================
 ACTIONS = {
@@ -571,7 +543,7 @@ def cleanup_old_excels():
         print(f"清理Excel失败: {e}")
 
 
-# ================== 核心打卡函数（已优化版）==================
+# ================== 核心打卡函数（已增加单次限制）==================
 async def daka(update: Update, context: ContextTypes.DEFAULT_TYPE, shift: str):
     chat_id_str = str(update.effective_chat.id)
     user = update.effective_user
@@ -582,9 +554,7 @@ async def daka(update: Update, context: ContextTypes.DEFAULT_TYPE, shift: str):
         chat_data_temp = await data_manager.get_chat_data(chat_id_str)
         if not chat_data_temp.get("activated", False):
             await update.message.reply_text(
-                "⚠️ **本群尚未激活**\n\n"
-                "此机器人需要密码才能激活使用。\n"
-                "请联系机器人管理员获取激活密码。",
+                "⚠️ **本群尚未激活**\n\n此机器人需要密码才能激活使用。\n请联系机器人管理员获取激活密码。",
                 parse_mode="Markdown"
             )
             return
@@ -597,9 +567,7 @@ async def daka(update: Update, context: ContextTypes.DEFAULT_TYPE, shift: str):
     # ================== 私聊禁用打卡 ==================
     if update.effective_chat.type == "private":
         await update.message.reply_text(
-            "⚠️ **私聊中无法使用打卡功能**\n\n"
-            "请在群聊中发送 1-8 进行打卡。\n"
-            "私聊仅支持 /start 和 /myrecord 命令。",
+            "⚠️ **私聊中无法使用打卡功能**\n\n请在群聊中发送 1-8 进行打卡。",
             parse_mode="Markdown"
         )
         return
@@ -623,7 +591,19 @@ async def daka(update: Update, context: ContextTypes.DEFAULT_TYPE, shift: str):
 
     action_info = ACTIONS.get(shift, {"name": f"操作{shift}", "type": "unknown"})
 
-    # ================== 【已修复】状态判断 - 使用严格可靠版本 ==================
+    # ================== 【新增】1,2,3,4 单次打卡限制 ==================
+    if shift in {"1", "2", "3", "4"}:
+        for r in records:
+            if r.get("action") == shift:
+                await update.message.reply_text(
+                    f"⚠️ **{user.full_name}**\n\n"
+                    f"今日 **{action_info['name']}** 已打卡，无需重复打卡！\n"
+                    f"时间：{r.get('time', '未知')}",
+                    parse_mode="Markdown"
+                )
+                return
+
+    # ================== 状态判断 ==================
     open_rest, open_work_rest = get_open_status(records)
 
     # ================== 严格业务规则 ==================
@@ -1058,38 +1038,16 @@ async def send_daily_report(context: ContextTypes.DEFAULT_TYPE):
     now = beijing_now()
     report_date = get_report_date_for_daily()
     
-    # ================== 强力调试日志 ==================
-    print("=" * 80)
-    print(f"🕒 自动日报任务触发 | 北京时间: {now.strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"📊 要生成的报表日期: {report_date}")
-    print("=" * 80)
-
-    # 调试：查看数据中实际存在的日期（帮助排查问题）
-    all_data = await data_manager.aload(force=True)
-    debug_shown = False
-    for chat_id_str, chat_data in list(all_data.items()):
-        if not chat_id_str.startswith('-'):
-            continue
-        print(f"群 {chat_id_str} 存在的日期记录：")
-        for user_id, user_info in list(chat_data.get("users", {}).items())[:3]:  # 只看前3个用户
-            dates = sorted(user_info.get("records", {}).keys(), reverse=True)
-            print(f"  - 用户 {user_id} 最近5个日期: {dates[:5] if dates else '无记录'}")
-            debug_shown = True
-            break
-        if debug_shown:
-            break
-    if not debug_shown:
-        print("⚠️ 未找到任何群组数据或记录")
-    print("=" * 80)
-    # ================== 调试结束 ==================
-
+    print(f"🕒 自动日报触发 | 时间: {now} | 报表日期: {report_date}")
+    
     cleanup_old_excels()
 
+    # 全局一次性加载，避免多次 aload
     all_data = await data_manager.aload(force=True)
     sent_count = 0
     
     for chat_id_str, chat_data in list(all_data.items()):
-        if not chat_id_str.startswith('-'):   
+        if not chat_id_str.startswith('-'):
             continue
             
         chat_id = int(chat_id_str)
@@ -1101,12 +1059,11 @@ async def send_daily_report(context: ContextTypes.DEFAULT_TYPE):
         recipients.update(int(uid) for uid in chat_data.get("admins", []))
 
         if not recipients:
-            print(f"⚠️ 群 {chat_id} 没有收件人")
             continue
 
         try:
-            fresh_chat_data = await data_manager.get_chat_data(chat_id_str)
-            rows = build_daily_report_rows(fresh_chat_data, report_date)
+            # 使用已经加载的数据，避免再次 get_chat_data
+            rows = build_daily_report_rows(chat_data, report_date)
             
             filename = f"全群打卡日报_{report_date}.xlsx"
             filepath = os.path.join(EXCEL_FOLDER, filename)
@@ -1118,31 +1075,24 @@ async def send_daily_report(context: ContextTypes.DEFAULT_TYPE):
             df = pd.DataFrame(rows, columns=cols) if rows else pd.DataFrame(columns=cols)
             df.to_excel(filepath, index=False)
 
-            caption = f"📊 **{report_date} 全群日报**（02:00~次日02:00）"
+            caption = f"📊 **{report_date} 全群日报**"
 
             success = 0
             for rid in recipients:
                 try:
                     with open(filepath, 'rb') as f:
-                        await context.bot.send_document(
-                            rid, 
-                            f, 
-                            filename=filename, 
-                            caption=caption, 
-                            parse_mode="Markdown"
-                        )
+                        await context.bot.send_document(rid, f, filename=filename, caption=caption, parse_mode="Markdown")
                     success += 1
                 except Exception as e:
-                    print(f"❌ 发送给 {rid} 失败: {e}")
+                    print(f"发送给 {rid} 失败: {e}")
             
-            print(f"✅ 群 {chat_id} 日报发送完成 → {success}/{len(recipients)} 人接收")
+            print(f"群 {chat_id} 日报发送完成 → {success}/{len(recipients)}")
             sent_count += 1
             
         except Exception as e:
-            print(f"❌ 群 {chat_id} 生成/发送日报异常: {e}")
+            print(f"群 {chat_id} 处理异常: {e}")
     
-    print(f"🎉 自动日报任务全部完成，共处理 {sent_count} 个群组")
-
+    print(f"🎉 自动日报任务完成，共处理 {sent_count} 个群组")
 
 # ================== 其他命令 ==================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1233,24 +1183,25 @@ async def today_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ================== 全局错误处理器 ==================
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    """捕获所有错误，防止 Bot 因为 Bad Gateway 等网络问题直接崩溃"""
+    """捕获所有错误"""
     error = context.error
-    
     print(f"❌ 【全局错误】 {type(error).__name__}: {error}")
+
+    # === 关键修复：使用字符串判断或直接导入 ===
+    error_str = str(type(error).__name__).lower()
     
-    # 网络相关错误（最常见的问题）
-    if isinstance(error, telegram.error.NetworkError):
-        print("🌐 检测到 Telegram 网络错误（Bad Gateway / Timeout），Bot 将自动继续运行...")
-        await asyncio.sleep(5)   # 短暂等待后继续
+    if "networkerror" in error_str or "readerror" in error_str or "timeout" in error_str:
+        print("🌐 检测到 Telegram 网络错误（Bad Gateway / ReadError / Timeout），Bot 将继续运行...")
+        await asyncio.sleep(5)
         return
-        
-    if isinstance(error, telegram.error.TelegramError):
-        print("⚠️ Telegram API 错误，Bot 将继续运行...")
+
+    if "telegramerror" in error_str:
+        print("⚠️ Telegram API 错误，Bot 继续运行...")
         return
-    
-    # 其他未知严重错误，打印完整堆栈
+
+    # 其他严重错误打印完整堆栈
     import traceback
-    print("🔥 严重错误（非网络错误）:")
+    print("🔥 严重错误:")
     print(traceback.format_exc())
     
     # 可选：通知群主或管理员（把 YOUR_ADMIN_ID 改成你的ID）
@@ -1312,7 +1263,7 @@ def main():
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_daka))
 
-    print("🚀 打卡机器人已完全启动（啊财的机器人  7.10 ）")
+    print("🚀 打卡机器人已完全启动（啊财的机器人  7.13 ）")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
