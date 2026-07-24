@@ -630,7 +630,7 @@ async def daka(update: Update, context: ContextTypes.DEFAULT_TYPE, shift: str):
     # 下班必须结束休息
     if shift in ["2", "4"]:
         if open_rest or open_work_rest:
-            await update.message.reply_text("⚠️ 下班前必须先结束休息/暂离")
+            await update.message.reply_text("⚠️ 下班打卡无效，下班前需要先结束休息6/暂离8")
             return
 
     # ================== 执行打卡 ==================
